@@ -181,8 +181,36 @@ func (tg TelegramQuizBot) processCallbackQuery(callback *tgbotapi.CallbackQuery)
 	return nil
 }
 
+func min(a, b int) int {
+	if a <= b {
+		return a
+	}
+	return b
+}
+
+func chunkSplit(body string, limit int) []string {
+	chunks := []string{}
+
+	for i := 0; i < len(body); i += limit {
+		batch := body[i:min(i+limit, len(body))]
+		chunks = append(chunks, batch)
+	}
+
+	return chunks
+}
+
 func (tg TelegramQuizBot) askSingleAnswerQuestion(client BotClient, q Question) {
-	pollcfg := tgbotapi.NewPoll(client.chatID, q.Question, q.Choices...)
+	trailingSnippet := q.Question
+
+	if len(q.Question) >= 255 {
+		questionChunks := chunkSplit(q.Question, 125)
+		trailingSnippet = questionChunks[len(questionChunks)-1]
+		for _, questionSnippet := range questionChunks[:len(questionChunks)-1] {
+			client.SendMSG(tg.bot, questionSnippet)
+		}
+	}
+
+	pollcfg := tgbotapi.NewPoll(client.chatID, trailingSnippet, q.Choices...)
 	pollcfg.Type = "quiz"
 	pollcfg.CorrectOptionID = int64(q.Correct[0])
 
@@ -203,7 +231,17 @@ func Equal(a, b []int) bool {
 }
 
 func (tg TelegramQuizBot) askMultiAnswerQuestion(client BotClient, q Question) {
-	pollcfg := tgbotapi.NewPoll(client.chatID, q.Question, q.Choices...)
+	trailingSnippet := q.Question
+
+	if len(q.Question) >= 255 {
+		questionChunks := chunkSplit(q.Question, 125)
+		trailingSnippet = questionChunks[len(questionChunks)-1]
+		for _, questionSnippet := range questionChunks[:len(questionChunks)-1] {
+			client.SendMSG(tg.bot, questionSnippet)
+		}
+	}
+
+	pollcfg := tgbotapi.NewPoll(client.chatID, trailingSnippet, q.Choices...)
 	pollcfg.AllowsMultipleAnswers = true
 
 	msg, _ := tg.bot.Send(pollcfg)
@@ -222,9 +260,9 @@ func (tg TelegramQuizBot) askMultiAnswerQuestion(client BotClient, q Question) {
 	}
 
 	if Equal(Picked, q.Correct) {
-		client.SendMSG(tg.bot, "You got it!!")
+		client.SendMSG(tg.bot, "You got it!! ✔️")
 	} else {
-		response := "Sorry. You got it wrong :( \n The correct answers are :\n---"
+		response := "Sorry. You got it wrong ❌❌❌ :( \n The correct answers are :\n---"
 		for _, answer := range q.Correct {
 			response += q.Choices[answer] + "\n"
 		}
