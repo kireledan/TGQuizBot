@@ -1,8 +1,9 @@
 package main
 
 import (
-	"os"
 	"fmt"
+	"os"
+
 	"github.com/kireledan/TGQuizBot/bot"
 )
 
@@ -16,6 +17,14 @@ func InitializeBot() {
 	bot.Run()
 }
 
+func PrintQuizzes() {
+	fmt.Println(bot.GetQuiz().GetRandomQuestion())
+}
+
 func main() {
-	InitializeBot()
+	if len(os.Args) > 1 {
+		PrintQuizzes()
+	} else {
+		InitializeBot()
+	}
 }
