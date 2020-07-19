@@ -24,6 +24,8 @@ type BotClient struct {
 	TimeOfNextQuestion time.Time
 	Quiz               Quiz
 	PersonalChannel    chan tgbotapi.Update
+	QuestionsCorrect   int
+	QuestionsAsked     int
 }
 
 func (bc BotClient) SendMSG(api *tgbotapi.BotAPI, msg string) {
@@ -79,15 +81,17 @@ func InitTelegramQuizBot(token string) TelegramQuizBot {
 		var chatid int64
 		var nextquestiontime time.Time
 		var questionInterval time.Duration
-		err = rows.Scan(&chatid, &nextquestiontime, &questionInterval)
+		var questionsAsked int
+		var questionsCorrect int
+		err = rows.Scan(&chatid, &nextquestiontime, &questionInterval, questionsAsked, questionsCorrect)
 		checkErr(err)
-		fmt.Println("chatid | nextquestiontime | questionInterval  ")
-		fmt.Printf("%10v | %8v | %6v \n", chatid, nextquestiontime, questionInterval)
 
 		client := BotClient{
 			chatID:             chatid,
 			TimeOfNextQuestion: nextquestiontime,
 			QuestionInterval:   questionInterval,
+			QuestionsCorrect:   questionsCorrect,
+			QuestionsAsked:     questionsAsked,
 			Quiz:               GetQuiz(),
 		}
 		clients[chatid] = client

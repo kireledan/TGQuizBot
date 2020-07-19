@@ -6,3 +6,10 @@ CREATE TABLE connected_users
 		);
 		
 ALTER TABLE connected_users ADD CONSTRAINT chatid PRIMARY KEY (chatid);
+
+
+ALTER TABLE connected_users
+ADD COLUMN questionsAsked int constraint;
+
+ALTER TABLE connected_users
+ADD COLUMN questionsCorrect int constraint;
