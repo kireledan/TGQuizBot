@@ -9,7 +9,10 @@ ALTER TABLE connected_users ADD CONSTRAINT chatid PRIMARY KEY (chatid);
 
 
 ALTER TABLE connected_users
-ADD COLUMN questionsAsked int constraint;
+ADD COLUMN questionsAsked int;
 
 ALTER TABLE connected_users
-ADD COLUMN questionsCorrect int constraint;
+ADD COLUMN questionsCorrect int;
+
+ALTER TABLE connected_users
+ADD COLUMN questionsSent int;

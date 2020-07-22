@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -14,8 +15,9 @@ import (
 
 type TelegramQuizBot struct {
 	bot              *tgbotapi.BotAPI
-	connectedClients map[int64]BotClient
+	connectedClients map[int64]*BotClient
 	DB               *pgx.Conn
+	updateGroup      sync.Mutex
 }
 
 type BotClient struct {
@@ -26,6 +28,7 @@ type BotClient struct {
 	PersonalChannel    chan tgbotapi.Update
 	QuestionsCorrect   int
 	QuestionsAsked     int
+	QuestionsSent      int
 }
 
 func (bc BotClient) SendMSG(api *tgbotapi.BotAPI, msg string) {
@@ -46,7 +49,9 @@ func (tg TelegramQuizBot) SetQuizInterval(chatID int64, duration time.Duration) 
 		_, err := tg.DB.Exec(context.Background(), "UPDATE connected_users SET questioninterval = $1, nextquestiontime = $2 WHERE chatid = $3;", client.QuestionInterval, client.TimeOfNextQuestion, chatID)
 		checkErr(err)
 		tg.bot.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Quiz interval set to %s hours!", duration.String())))
+		tg.updateGroup.Lock()
 		tg.connectedClients[chatID] = client
+		tg.updateGroup.Unlock()
 	}
 }
 
@@ -73,7 +78,7 @@ func InitTelegramQuizBot(token string) TelegramQuizBot {
 		os.Exit(1)
 	}
 
-	clients := map[int64]BotClient{}
+	clients := map[int64]*BotClient{}
 
 	// Populate connected clients from
 	rows, err := conn.Query(context.Background(), "SELECT * FROM connected_users")
@@ -83,7 +88,8 @@ func InitTelegramQuizBot(token string) TelegramQuizBot {
 		var questionInterval time.Duration
 		var questionsAsked int
 		var questionsCorrect int
-		err = rows.Scan(&chatid, &nextquestiontime, &questionInterval, questionsAsked, questionsCorrect)
+		var questionsSent int
+		err = rows.Scan(&chatid, &nextquestiontime, &questionInterval, &questionsAsked, &questionsCorrect, &questionsSent)
 		checkErr(err)
 
 		client := BotClient{
@@ -92,9 +98,10 @@ func InitTelegramQuizBot(token string) TelegramQuizBot {
 			QuestionInterval:   questionInterval,
 			QuestionsCorrect:   questionsCorrect,
 			QuestionsAsked:     questionsAsked,
+			QuestionsSent:      questionsSent,
 			Quiz:               GetQuiz(),
 		}
-		clients[chatid] = client
+		clients[chatid] = &client
 	}
 
 	teleBot := TelegramQuizBot{bot: bot, connectedClients: clients, DB: conn}
@@ -120,13 +127,17 @@ func (tg TelegramQuizBot) Setup(chatID int64) error {
 	setupMSG.ReplyMarkup = numericKeyboard
 
 	if _, ok := tg.connectedClients[chatID]; !ok {
-		tg.connectedClients[chatID] = BotClient{chatID: chatID, Quiz: GetQuiz(), PersonalChannel: make(chan tgbotapi.Update)}
+		tg.updateGroup.Lock()
+		newClient := BotClient{chatID: chatID, Quiz: GetQuiz(), PersonalChannel: make(chan tgbotapi.Update)}
+		tg.connectedClients[chatID] = &newClient
+		tg.updateGroup.Unlock()
 		nextTime := time.Now().Add(time.Hour)
 		_, err := tg.DB.Exec(context.Background(), "INSERT INTO connected_users(chatid,nextquestiontime,questionInterval) VALUES($1,$2,$3);", chatID, nextTime, time.Hour)
 		checkErr(err)
 		tg.connectedClients[chatID].SendMSG(tg.bot, "Let's start off with a single question :)")
 		go tg.QuizUser(tg.connectedClients[chatID])
 		tg.connectedClients[chatID].SendMSG(tg.bot, "You'll receive your next question in the time span you selected!")
+
 	}
 
 	tg.bot.Send(setupMSG)
@@ -134,13 +145,23 @@ func (tg TelegramQuizBot) Setup(chatID int64) error {
 	return nil
 }
 
-func (tg TelegramQuizBot) SyncUserData() error {
-	for _, client := range tg.connectedClients {
-		_, err := tg.DB.Exec(context.Background(), "UPDATE connected_users SET nextquestiontime = $1 WHERE chatid = $2;", client.TimeOfNextQuestion, client.chatID)
-		checkErr(err)
+func (tg TelegramQuizBot) SyncUserData(client *BotClient) error {
+	_, err := tg.DB.Exec(context.Background(), "UPDATE connected_users SET nextquestiontime = $1, questionsAsked = $2, questionsCorrect = $3 WHERE chatid = $4;", client.TimeOfNextQuestion, client.QuestionsAsked, client.QuestionsCorrect, client.chatID)
+	if err != nil {
+		return err
 	}
 	return nil
+}
 
+func (tg TelegramQuizBot) SyncAllUserData() error {
+	for _, client := range tg.connectedClients {
+		err := tg.SyncUserData(client)
+		if err != nil {
+			fmt.Println("Unable to sync all user data :(")
+			return err
+		}
+	}
+	return nil
 }
 
 func inTimeSpan(start, end, check time.Time) bool {
@@ -153,8 +174,13 @@ func inTimeSpan(start, end, check time.Time) bool {
 	return !start.After(check) || !end.Before(check)
 }
 
-func (tg TelegramQuizBot) QuizUser(client BotClient) {
+func (tg TelegramQuizBot) QuizUser(client *BotClient) {
 	question := client.Quiz.GetRandomQuestion()
+
+	tg.updateGroup.Lock()
+	client.QuestionsSent++
+	tg.connectedClients[client.chatID] = client
+	tg.updateGroup.Unlock()
 
 	pretty.Print(question)
 	if len(question.Correct) == 1 {
@@ -177,12 +203,20 @@ func (tg TelegramQuizBot) createSendingChannel() {
 					client := rclient
 					fmt.Println(client.TimeOfNextQuestion)
 					if time.Now().After(client.TimeOfNextQuestion) {
+						fmt.Println("TIME TO SEND A MESSAGE TO ", client.chatID)
 						go tg.QuizUser(client)
+						fmt.Println(client.TimeOfNextQuestion)
+						fmt.Println("UPDATING THE TIME ")
+						fmt.Println(client.QuestionInterval)
 						client.TimeOfNextQuestion = time.Now().Add(client.QuestionInterval)
+						fmt.Println(client.TimeOfNextQuestion)
+						fmt.Println(time.Now().Add(client.QuestionInterval))
+						tg.updateGroup.Lock()
 						tg.connectedClients[client.chatID] = client
+						tg.updateGroup.Unlock()
+						tg.SyncUserData(client)
 					}
 				}
-				tg.SyncUserData()
 			case <-quit:
 				ticker.Stop()
 				return
@@ -211,15 +245,32 @@ func (tg TelegramQuizBot) Run() error {
 			if update.Message.Command() == "quiz" {
 				go tg.QuizUser(tg.connectedClients[update.Message.Chat.ID])
 			}
+			if update.Message.Command() == "stats" {
+				tg.SendUserStatistics(tg.connectedClients[update.Message.Chat.ID])
+			}
+			if update.Message.Command() == "next" {
+				tg.connectedClients[update.Message.Chat.ID].SendMSG(tg.bot, tg.connectedClients[update.Message.Chat.ID].TimeOfNextQuestion.String())
+			}
 		}
 		if update.Poll != nil {
 			if channel, ok := VariousChannels[update.Poll.ID]; ok {
+				fmt.Println("I got a poll response!!! from", update.Poll.ID)
 				channel <- update
 			}
 		}
 	}
 
 	return nil
+}
+
+func (tg TelegramQuizBot) SendUserStatistics(client *BotClient) {
+	statQuestion := "You have answered %d questions. With an accuracy of %d/%d (%d%%) \n I have sent you %d questions."
+	if client.QuestionsAsked > 0 {
+		percent := (float32(client.QuestionsCorrect) / float32(client.QuestionsAsked)) * 100
+		client.SendMSG(tg.bot, fmt.Sprintf(statQuestion, client.QuestionsAsked, client.QuestionsCorrect, client.QuestionsAsked, int(percent), client.QuestionsSent))
+	} else {
+		client.SendMSG(tg.bot, "You haven't answered any questions yet 🥺🥺🥺🥺")
+	}
 }
 
 func (tg TelegramQuizBot) processMessage(update *tgbotapi.Message) error {
@@ -259,7 +310,7 @@ func chunkSplit(body string, limit int) []string {
 	return chunks
 }
 
-func (tg TelegramQuizBot) askSingleAnswerQuestion(client BotClient, q Question) {
+func (tg TelegramQuizBot) askSingleAnswerQuestion(client *BotClient, q Question) {
 	trailingSnippet := q.Question
 
 	if len(q.Question) >= 255 {
@@ -274,8 +325,21 @@ func (tg TelegramQuizBot) askSingleAnswerQuestion(client BotClient, q Question) 
 	pollcfg.Type = "quiz"
 	pollcfg.CorrectOptionID = int64(q.Correct[0])
 
-	tg.bot.Send(pollcfg)
+	msg, _ := tg.bot.Send(pollcfg)
 
+	fmt.Println("waiting for poll ID....", msg.Poll.ID)
+	pollUpdates := make(chan tgbotapi.Update)
+	VariousChannels[msg.Poll.ID] = pollUpdates
+	update := <-pollUpdates
+
+	Picked := []int{}
+	for optionNum, option := range update.Poll.Options {
+		if option.VoterCount > 0 {
+			Picked = append(Picked, optionNum)
+		}
+	}
+
+	tg.processChoice(client, q, Picked)
 }
 
 func Equal(a, b []int) bool {
@@ -290,7 +354,7 @@ func Equal(a, b []int) bool {
 	return true
 }
 
-func (tg TelegramQuizBot) askMultiAnswerQuestion(client BotClient, q Question) {
+func (tg TelegramQuizBot) askMultiAnswerQuestion(client *BotClient, q Question) {
 	trailingSnippet := q.Question
 
 	if len(q.Question) >= 255 {
@@ -309,7 +373,7 @@ func (tg TelegramQuizBot) askMultiAnswerQuestion(client BotClient, q Question) {
 	pollUpdates := make(chan tgbotapi.Update)
 	VariousChannels[msg.Poll.ID] = pollUpdates
 
-	fmt.Println("waiting....")
+	fmt.Println("waiting for poll ID....", msg.Poll.ID)
 	update := <-pollUpdates
 
 	Picked := []int{}
@@ -319,14 +383,43 @@ func (tg TelegramQuizBot) askMultiAnswerQuestion(client BotClient, q Question) {
 		}
 	}
 
-	if Equal(Picked, q.Correct) {
-		client.SendMSG(tg.bot, "You got it!! ✔️")
+	tg.processChoice(client, q, Picked)
+}
+
+func (tg TelegramQuizBot) processChoice(client *BotClient, q Question, pickedAnswers []int) error {
+	isCorrect := false
+	if Equal(pickedAnswers, q.Correct) {
+		if len(pickedAnswers) > 1 {
+			client.SendMSG(tg.bot, "You got it!! ✔️")
+
+		}
+		isCorrect = true
 	} else {
 		response := "Sorry. You got it wrong ❌❌❌ :( \n The correct answers are :\n---"
 		for _, answer := range q.Correct {
 			response += q.Choices[answer] + "\n"
 		}
-		client.SendMSG(tg.bot, response)
+		if len(pickedAnswers) > 1 {
+			client.SendMSG(tg.bot, response)
+		}
 	}
 
+	err := tg.IncrementQuestionStats(client, isCorrect)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (tg TelegramQuizBot) IncrementQuestionStats(client *BotClient, isCorrect bool) error {
+	tg.updateGroup.Lock()
+	client.QuestionsAsked++
+	if isCorrect {
+		client.QuestionsCorrect++
+	}
+	tg.connectedClients[client.chatID] = client
+	tg.SyncUserData(client)
+	tg.updateGroup.Unlock()
+	return nil
 }

@@ -37,7 +37,7 @@ func (q Quiz) GetRandomQuestion() Question {
 }
 
 func GetQuiz() Quiz {
-	quizFiles := []string{"./exam1.html", "./exam2.html", "./exam3.html", "./exam4.html"}
+	quizFiles := []string{"./exam1.html", "./exam2.html", "./exam3.html", "./exam4.html", "./exam5.html"}
 	AllQuestions := []Question{}
 
 	for _, qfile := range quizFiles {
